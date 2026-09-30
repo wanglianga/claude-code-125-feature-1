@@ -31,11 +31,11 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
   if (!body.name || !body.supplier_id || !body.order_deadline) return fail('计划名称、供应商、截止时间必填');
   const id = await tx(async (conn) => {
     const [r]: any = await conn.query(
-      `INSERT INTO plans (name,kind,academic_year,season,supplier_id,status,order_deadline,fitting_date,note,created_by)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO plans (name,kind,academic_year,season,supplier_id,status,order_deadline,production_deadline,fitting_date,note,created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       [body.name, body.kind || 'annual', body.academic_year, body.season || '春秋',
-       body.supplier_id, body.status || 'draft', body.order_deadline, body.fitting_date || null,
-       body.note || null, user.id]);
+       body.supplier_id, body.status || 'draft', body.order_deadline, body.production_deadline || null,
+       body.fitting_date || null, body.note || null, user.id]);
     const pid = r.insertId;
     for (const cid of body.campus_ids || []) {
       await conn.query('INSERT IGNORE INTO plan_campuses (plan_id,campus_id) VALUES (?,?)', [pid, cid]);
@@ -59,8 +59,8 @@ export const PATCH = api(async (_req: NextRequest, body: any, user) => {
   if (!p) return fail('计划不存在', 404);
   if (body.status && body.status !== p.status && !['draft', 'open', 'closed'].includes(body.status))
     return fail('状态非法');
-  await query('UPDATE plans SET status=COALESCE(?,status), fitting_date=COALESCE(?,fitting_date) WHERE id=?',
-    [body.status || null, body.fitting_date || null, body.id]);
+  await query('UPDATE plans SET status=COALESCE(?,status), fitting_date=COALESCE(?,fitting_date), production_deadline=COALESCE(?,production_deadline) WHERE id=?',
+    [body.status || null, body.fitting_date || null, body.production_deadline || null, body.id]);
   await logActivity({ actor: user, action: '更新计划', detail: body.status ? `状态→${body.status}` : p.name });
   return ok();
 }, ['admin', 'general_affairs']);

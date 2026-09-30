@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS plans (
   supplier_id INT NOT NULL,
   status ENUM('draft','open','closed') NOT NULL DEFAULT 'draft',
   order_deadline DATETIME NOT NULL,
+  production_deadline DATETIME NULL COMMENT '班级生产锁定截止日（仍未闭环转总务预锁/延后）',
   fitting_date DATE NULL,
   note VARCHAR(300),
   created_by INT NULL,
@@ -133,11 +134,13 @@ CREATE TABLE IF NOT EXISTS plan_items (
   CONSTRAINT fk_pi_plan FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 试穿时段（班主任按时段组织）
+-- 试穿时段（班主任按时段组织；kind=makeup 为集中试穿后的补测时段）
 CREATE TABLE IF NOT EXISTS fitting_sessions (
   id INT AUTO_INCREMENT PRIMARY KEY,
   plan_id INT NOT NULL,
   class_id INT NOT NULL,
+  kind ENUM('regular','makeup') NOT NULL DEFAULT 'regular',
+  makeup_session_id INT NULL COMMENT '补测时段关联的补测安排',
   start_time DATETIME NOT NULL,
   end_time DATETIME NOT NULL,
   location VARCHAR(100) NOT NULL,
@@ -168,6 +171,8 @@ CREATE TABLE IF NOT EXISTS fitting_records (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 订单（hold：迟缴费/转学等暂缓，供应商不可投产）
+-- size_lock: none 正式尺码可投产；risk_placeholder 漏测风险占位（仅参考尺码，不计正式数量）；
+--            review 班主任/家长两次确认不一致待复核；prelocked 总务批准按参考尺码预锁；locked 已闭环正式锁定
 CREATE TABLE IF NOT EXISTS orders (
   id INT AUTO_INCREMENT PRIMARY KEY,
   order_no VARCHAR(40) NOT NULL UNIQUE,
@@ -176,6 +181,8 @@ CREATE TABLE IF NOT EXISTS orders (
   class_id INT NOT NULL,
   status ENUM('draft','confirmed','paid','hold','cancelled') NOT NULL DEFAULT 'draft',
   hold_reason VARCHAR(200),
+  size_lock ENUM('none','risk_placeholder','review','prelocked','locked') NOT NULL DEFAULT 'none',
+  risk_placeholder TINYINT(1) NOT NULL DEFAULT 0,
   payable_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
   subsidy_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
   due_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
@@ -408,6 +415,149 @@ CREATE TABLE IF NOT EXISTS supplier_assessments (
   CONSTRAINT fk_sa_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
   CONSTRAINT fk_sa_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
   CONSTRAINT fk_sa_user FOREIGN KEY (assessed_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ===================== 集中试穿漏测：补测与生产锁定 =====================
+
+-- 班主任空闲时间（生成补测候选时段的约束之一；按校区/老师维护）
+CREATE TABLE IF NOT EXISTS teacher_availabilities (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  teacher_user_id INT NOT NULL,
+  campus_id INT NOT NULL,
+  start_time DATETIME NOT NULL,
+  end_time DATETIME NOT NULL,
+  note VARCHAR(200),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX (teacher_user_id), INDEX (campus_id),
+  CONSTRAINT fk_ta_teacher FOREIGN KEY (teacher_user_id) REFERENCES users(id),
+  CONSTRAINT fk_ta_campus FOREIGN KEY (campus_id) REFERENCES campuses(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 供应商可用尺码样衣库存（校区 × 尺码；补测候选时段只能安排在库存可覆盖的尺码集合上）
+CREATE TABLE IF NOT EXISTS sample_stock (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  supplier_id INT NOT NULL,
+  campus_id INT NOT NULL,
+  size VARCHAR(20) NOT NULL,
+  qty INT NOT NULL DEFAULT 0,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_sample (supplier_id, campus_id, size),
+  CONSTRAINT fk_ss_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+  CONSTRAINT fk_ss_campus FOREIGN KEY (campus_id) REFERENCES campuses(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 补测安排（系统按班级/校区/样衣/班主任空闲生成候选，总务或班主任拍板；多班竞争按优先级排序）
+CREATE TABLE IF NOT EXISTS makeup_sessions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  plan_id INT NOT NULL,
+  class_id INT NOT NULL,
+  campus_id INT NOT NULL,
+  supplier_id INT NOT NULL,
+  start_time DATETIME NOT NULL,
+  end_time DATETIME NOT NULL,
+  location VARCHAR(100) NOT NULL,
+  teacher_user_id INT NOT NULL,
+  priority_score INT NOT NULL DEFAULT 0 COMMENT '生产截止日紧迫度+首次订购+已确认人数综合优先级，越大越优先',
+  status ENUM('candidate','scheduled','completed','overdue','cancelled') NOT NULL DEFAULT 'candidate',
+  adjusted_by INT NULL COMMENT '人工调整人',
+  adjust_reason VARCHAR(300) COMMENT '人工调整原因（必须留痕）',
+  created_by INT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX (plan_id), INDEX (class_id), INDEX (status),
+  CONSTRAINT fk_ms_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_ms_class FOREIGN KEY (class_id) REFERENCES classes(id),
+  CONSTRAINT fk_ms_campus FOREIGN KEY (campus_id) REFERENCES campuses(id),
+  CONSTRAINT fk_ms_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+  CONSTRAINT fk_ms_teacher FOREIGN KEY (teacher_user_id) REFERENCES users(id),
+  CONSTRAINT fk_ms_adjuster FOREIGN KEY (adjusted_by) REFERENCES users(id),
+  CONSTRAINT fk_ms_creator FOREIGN KEY (created_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 补测学生明细（漏测学生：参考尺码→实测→班主任确认→家长确认→闭环/复核/预锁/延后）
+CREATE TABLE IF NOT EXISTS makeup_students (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  makeup_session_id INT NULL,
+  plan_id INT NOT NULL,
+  student_id INT NOT NULL,
+  class_id INT NOT NULL,
+  order_id INT NULL,
+  is_first_order TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否首次订购（竞争优先级因子）',
+  -- 家长在补测前只能提交“参考尺码”，供应商不得计入正式数量
+  ref_size_top VARCHAR(20) NULL,
+  ref_size_pants VARCHAR(20) NULL,
+  ref_size_skirt VARCHAR(20) NULL,
+  ref_size_coat VARCHAR(20) NULL,
+  ref_size_shoes VARCHAR(20) NULL,
+  ref_submitted_at DATETIME NULL,
+  -- 补测实测尺码
+  meas_size_top VARCHAR(20) NULL,
+  meas_size_pants VARCHAR(20) NULL,
+  meas_size_skirt VARCHAR(20) NULL,
+  meas_size_coat VARCHAR(20) NULL,
+  meas_size_shoes VARCHAR(20) NULL,
+  measured_by INT NULL,
+  measured_at DATETIME NULL,
+  teacher_confirmed TINYINT(1) NOT NULL DEFAULT 0,
+  teacher_confirmed_at DATETIME NULL,
+  parent_confirmed TINYINT(1) NOT NULL DEFAULT 0,
+  parent_confirmed_at DATETIME NULL,
+  -- pending_ref 待提交参考尺码 / waiting 待测 / measured 已测待班主任确认 / teacher_done 待家长确认 /
+  -- closed 两确认一致闭环 / review 两确认不一致待复核 / prelocked 总务批准按参考预锁 /
+  -- postponed 总务批准延后 / overdue 补测逾期 / parent_timeout 家长超时未确认 / sample_shortage 样衣不足
+  status ENUM('pending_ref','waiting','measured','teacher_done','closed','review','prelocked','postponed','overdue','parent_timeout','sample_shortage')
+    NOT NULL DEFAULT 'pending_ref',
+  deadline DATETIME NULL COMMENT '家长确认最终尺码的截止时间',
+  ga_decision_by INT NULL,
+  ga_decision_at DATETIME NULL,
+  ga_decision_reason VARCHAR(300) COMMENT '总务预锁/延后原因（留入学生订单与班级进度）',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_mk_plan_student (plan_id, student_id),
+  INDEX (makeup_session_id), INDEX (student_id), INDEX (status),
+  CONSTRAINT fk_mkst_session FOREIGN KEY (makeup_session_id) REFERENCES makeup_sessions(id),
+  CONSTRAINT fk_mkst_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_mkst_student FOREIGN KEY (student_id) REFERENCES students(id),
+  CONSTRAINT fk_mkst_class FOREIGN KEY (class_id) REFERENCES classes(id),
+  CONSTRAINT fk_mkst_order FOREIGN KEY (order_id) REFERENCES orders(id),
+  CONSTRAINT fk_mkst_measurer FOREIGN KEY (measured_by) REFERENCES users(id),
+  CONSTRAINT fk_mkst_ga FOREIGN KEY (ga_decision_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 补测样衣占用/归还（多个班级竞争同一批样衣的并发约束）
+CREATE TABLE IF NOT EXISTS sample_reservations (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  makeup_session_id INT NOT NULL,
+  size VARCHAR(20) NOT NULL,
+  qty INT NOT NULL DEFAULT 1,
+  status ENUM('reserved','returned','shortage') NOT NULL DEFAULT 'reserved',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX (makeup_session_id),
+  CONSTRAINT fk_sr_session FOREIGN KEY (makeup_session_id) REFERENCES makeup_sessions(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 补测异常台账：补测逾期 / 样衣不足 / 家长超时未确认 均可追溯
+CREATE TABLE IF NOT EXISTS makeup_exceptions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  plan_id INT NOT NULL,
+  class_id INT NULL,
+  makeup_session_id INT NULL,
+  makeup_student_id INT NULL,
+  student_id INT NULL,
+  type ENUM('makeup_overdue','sample_shortage','parent_timeout') NOT NULL,
+  detail VARCHAR(500),
+  status ENUM('open','resolved') NOT NULL DEFAULT 'open',
+  resolved_by INT NULL,
+  resolved_at DATETIME NULL,
+  resolution VARCHAR(300),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX (plan_id), INDEX (type), INDEX (status),
+  CONSTRAINT fk_me_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_me_class FOREIGN KEY (class_id) REFERENCES classes(id),
+  CONSTRAINT fk_me_session FOREIGN KEY (makeup_session_id) REFERENCES makeup_sessions(id),
+  CONSTRAINT fk_me_student_row FOREIGN KEY (makeup_student_id) REFERENCES makeup_students(id),
+  CONSTRAINT fk_me_student FOREIGN KEY (student_id) REFERENCES students(id),
+  CONSTRAINT fk_me_resolver FOREIGN KEY (resolved_by) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 围绕同一名学生/同一批校服的全过程留痕

@@ -30,6 +30,11 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
             COALESCE(SUM(o.status='hold'),0) hold_cnt,
             COALESCE(SUM(o.status='draft'),0) draft_cnt,
             COALESCE(SUM(o.status='cancelled'),0) cancelled_cnt,
+            COALESCE(SUM(o.size_lock='risk_placeholder'),0) risk_cnt,
+            COALESCE(SUM(o.size_lock='review'),0) review_cnt,
+            COALESCE(SUM(o.size_lock='prelocked'),0) prelocked_cnt,
+            COALESCE(SUM(o.size_lock='locked'),0) locked_cnt,
+            (SELECT COUNT(*) FROM makeup_exceptions me WHERE me.student_id=s.id AND me.status='open') open_makeup_exc,
             COALESCE(SUM(o.due_amount),0) due_total,
             COALESCE(SUM(o.paid_amount),0) paid_total,
             (SELECT COUNT(*) FROM fitting_records fr JOIN fitting_sessions fs ON fs.id=fr.session_id
@@ -68,7 +73,11 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
             (SELECT COUNT(DISTINCT s2.id) FROM students s2
                JOIN fitting_records fr ON fr.student_id=s2.id
                JOIN fitting_sessions fs ON fs.id=fr.session_id
-              WHERE fs.class_id=c.id ${planId ? 'AND fs.plan_id=?' : ''}) fitted_students
+              WHERE fs.class_id=c.id ${planId ? 'AND fs.plan_id=?' : ''}) fitted_students,
+            (SELECT COUNT(*) FROM makeup_students mk WHERE mk.class_id=c.id
+               ${planId ? 'AND mk.plan_id=?' : ''}
+               AND mk.status NOT IN ('closed','postponed','prelocked')) makeup_open_cnt,
+            (SELECT COUNT(*) FROM makeup_exceptions me WHERE me.class_id=c.id AND me.status='open') makeup_exc_cnt
        FROM classes c
        JOIN grades g ON g.id=c.grade_id
        JOIN campuses cp ON cp.id=g.campus_id
@@ -76,7 +85,7 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
        LEFT JOIN orders o ON o.student_id=s.id ${planId ? 'AND o.plan_id=?' : ''}
        ${cWhere.length ? 'WHERE ' + cWhere.join(' AND ') : ''}
        GROUP BY c.id ORDER BY cp.id, g.id, c.id`,
-    [...(planId ? [planId, planId] : []), ...cArgs]);
+    [...(planId ? [planId, planId, planId] : []), ...cArgs]);
 
   return ok({ students: studentRows, classes: classRows });
 });

@@ -10,6 +10,7 @@ const MENUS: { roles: string[]; href: string; label: string }[] = [
   { roles: ['general_affairs', 'admin', 'parent'], href: '/plans', label: '订购计划' },
   { roles: ['general_affairs', 'admin', 'parent', 'head_teacher'], href: '/students', label: '学生与尺码' },
   { roles: ['head_teacher', 'general_affairs', 'admin'], href: '/fitting', label: '试穿日' },
+  { roles: ['general_affairs', 'admin', 'head_teacher', 'parent', 'supplier', 'factory'], href: '/makeup', label: '漏测补测' },
   { roles: ['general_affairs', 'admin', 'head_teacher', 'parent'], href: '/orders', label: '订单缴费' },
   { roles: ['supplier', 'factory', 'admin', 'general_affairs'], href: '/batches', label: '生产批次' },
   { roles: ['supplier', 'factory', 'admin', 'general_affairs'], href: '/production-blockers', label: '投产限制' },

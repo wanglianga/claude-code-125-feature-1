@@ -31,6 +31,7 @@ export default function OrderDetailPage() {
         <h2>订单 <span className="mono" style={{ fontSize: 14 }}>{o.order_no}</span></h2>
         <div className="row">
           <Badge status={o.status} />
+          {o.size_lock && o.size_lock !== 'none' && <Badge status={o.size_lock} />}
           <Link className="btn gray sm" href="/orders">返回列表</Link>
         </div>
       </div>

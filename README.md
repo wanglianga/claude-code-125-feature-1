@@ -58,6 +58,10 @@ DB_HOST=127.0.0.1 DB_PORT=3306 DB_USER=root DB_PASSWORD= DB_NAME=uniform
 |  | `sun_ma` | 孙朵朵：**工厂漏发补发**场景（见 E2E 脚本） |
 |  | `he_ma` | 何苗：**成长过快换码** + **面料过敏投诉** |
 |  | `ma_ba` | 马奔：知行校区 **毕业班补订** |
+|  | `tang_ma` | 唐糖：**集中试穿漏测**，已交参考尺码（风险占位）→ 补测双确认一致闭环 |
+|  | `feng_ba` | 冯远：**漏测 + 150 码样衣不足** → 补齐后补测，家长确认与实测不一致**待复核** |
+|  | `shen_ma` | 沈星：补测已测、**家长超时未确认**（风险占位）→ 总务按参考尺码**预锁** |
+|  | `han_ma` | 韩雪：一(1)班漏测，与二(1)班**竞争同批评测样衣/时段** → 截止日总务**延后该学生** |
 | 供应商 | `gys` | 锦绣校服有限公司：批次、分批发货、看投产限制 |
 | 工厂 | `gc` | 工厂调度：开工/报产 |
 | 售后客服 | `kf` | 工单分派、换码/补发/退款协同 |
@@ -87,6 +91,20 @@ DB_HOST=127.0.0.1 DB_PORT=3306 DB_USER=root DB_PASSWORD= DB_NAME=uniform
     面料过敏投诉、转学取消；售后客服分派，供应商/工厂在同一工单上推进；
     换码完成后订单明细尺码同步更新。
 11. **供应商考核 `/assessments`**：按计划自动统计漏发数、延期数、过敏投诉数、换码数并评分留档。
+12. **漏测补测与生产锁定 `/makeup`**：多名学生请假漏测时，按**班级 / 校区 / 供应商可用尺码样衣 /
+    班主任空闲时间**自动生成补测候选时段；多班竞争同批样衣或同一时段时，按**生产截止日紧迫度、
+    是否首次订购、已确认人数**综合排序（优先级高者先占样衣/老师时段），所有人工调整必须**填写原因并留痕**。
+    - 补测前家长只能提交**参考尺码**，供应商生产计划把该生标为**风险占位**，不计入正式生产数量；
+      下单时若发现该生在本计划无任何试穿（含补测）记录，订单自动置风险占位并进入补测台账。
+    - 补测完成后**班主任先确认测量记录、家长再确认最终尺码**；两次确认不一致订单进入**待复核**，
+      供应商不能锁定生产，总务复核裁定后才闭环。
+    - 达到**班级生产截止日**仍未闭环时，总务可批准**按参考尺码预锁**（计入正式数量、标记预锁风险）
+      或**延后该学生**（不计本批生产），系统同步**重算班级数量、生产批次与到校承诺**，决定与影响
+      写入学生订单时间线和班级进度。
+    - **补测逾期、样衣不足、家长超时未确认**均生成可追溯异常台账（`makeup_exceptions`），支持闭环留痕；
+      班主任空闲与各校区尺码样衣库存在同页维护。
+13. **投产限制 `/production-blockers`（增强）**：除缴费/挂起/转学等阻塞外，单列**漏测风险占位**与
+    **两次确认不一致待复核**的已缴费订单及其不能投产原因，并标注总务**按参考预锁**的可投产订单。
 
 ## 五、验证方式
 
@@ -99,7 +117,7 @@ npm run seed       # 重置为干净的演示数据
 npm run test:e2e   # 跑 scripts/e2e-test.mjs（HTTP 级，覆盖全角色 API 工作流）
 ```
 
-最近一次实际执行结果：**28 项断言全部通过（28 通过 / 0 失败）**，覆盖：
+最近一次实际执行结果：**58 项断言全部通过（58 通过 / 0 失败）**，覆盖：
 
 - 角色权限隔离（供应商不能建计划；家长只看自己孩子）
 - 试穿建议自动带入下单
@@ -114,6 +132,11 @@ npm run test:e2e   # 跑 scripts/e2e-test.mjs（HTTP 级，覆盖全角色 API �
 - **贫困生 50% 减免**金额正确
 - 供应商考核自动统计漏发等异常数
 - 进度看板按学生/班级汇总
+- **集中试穿漏测补测与生产锁定**：漏测名单识别；多班竞争按优先级生成候选、样衣不足异常留痕；
+  人工调整必须填原因；家长补参考尺码仍为**风险占位不计产**；班主任先确认→家长后确认的顺序约束；
+  双确认一致闭环→可投产；不一致→**待复核**不能锁定生产；**家长超时风险占位不计产**；总务复核裁定；
+  截止日**延后学生**（不计产、订单留痕）与**按参考尺码预锁**（可投产）；系统重算班级数量/批次/到校承诺
+  写入订单时间线；补测逾期/样衣不足/家长超时三类异常台账可追溯、逾期巡检幂等
 
 ### 2. 手工 UI 冒烟路径（建议按此顺序体验）
 
@@ -125,31 +148,47 @@ npm run test:e2e   # 跑 scripts/e2e-test.mjs（HTTP 级，覆盖全角色 API �
 6. `zw` 在「学生与尺码」把某生标记转学，观察订单自动挂起和退款工单生成。
 7. 「分批发放」新建补领场；进入发放场登记正常发放、缺件、错领，再在售后工单中补发自闭环。
 8. 「进度看板」按学生/班级核对缴费、试穿、生产、发放、售后各列。
+9. **漏测补测冒烟**：用 `zw` 进「漏测补测」→选 2026 春秋计划，可见唐糖/冯远/韩雪漏测与风险占位统计；
+   点「生成补测候选时段」→ 二(1)班唐糖成候选、冯远因 150 码样衣不足入异常台账；用 `gys` 在
+   「样衣与空闲」补 150 码 ×2，再生成一次把冯远挂入；用 `zhaols` 进入候选「人工调整」（不填原因会被拒），
+   「确认排期」后在试穿日能看到补测时段；进入场次登记实测、勾选并「班主任确认」；用 `tang_ma`
+   「确认最终尺码」一致后订单变已锁定，`gys` 可对 130 上衣投产到唐糖；用 `feng_ba` 把上衣改成 160 确认
+   → 待复核，`gys` 无法投产，`zw` 复核裁定按实测 150 闭环；对沈星执行「按参考尺码预锁」、对韩雪执行
+   「延后该学生」，观察「班级数量重算」标签与订单时间线中的决定与重算留痕。
 
 ## 六、数据库结构
 
-`db/schema.sql`，28 张表，核心：
+`db/schema.sql`，34 张表，核心：
 
 - 组织：`campuses / grades / classes / users / students / suppliers / subsidies`
-- 计划：`plans / plan_campuses / plan_grades / plan_items`
-- 试穿：`fitting_sessions / fitting_records`
-- 订单：`orders / order_items`
+- 计划：`plans`（含 `production_deadline` 班级生产锁定截止日）`/ plan_campuses / plan_grades / plan_items`
+- 试穿：`fitting_sessions`（`kind=regular/makeup` 区分集中试穿与补测）`/ fitting_records`
+- 订单：`orders`（`size_lock`: none/risk_placeholder/review/prelocked/locked + `risk_placeholder` 标记）`/ order_items`
+- 漏测补测：`teacher_availabilities`（班主任空闲）/ `sample_stock`（各校区尺码样衣库存）/
+  `makeup_sessions`（候选与排期、优先级、人工调整原因）/ `makeup_students`（参考尺码→实测→双确认→
+  闭环/复核/预锁/延后）/ `sample_reservations`（样衣竞争占用）/ `makeup_exceptions`（逾期/样衣不足/家长超时台账）
 - 生产：`production_batches / batch_items / batch_allocations`
 - 物流：`shipments / shipment_lines`
 - 发放：`distributions / receipts`
 - 售后：`aftersales_cases / exchange_requests / resend_records / refund_records / supplier_assessments`
-- 协同留痕：`activity_log`（所有角色围绕同一学生/订单的动作时间线）
+- 协同留痕：`activity_log`（所有角色围绕同一学生/订单的动作时间线，含补测决定与数量重算影响）
 
 ## 七、目录说明
 
 ```
-db/schema.sql            数据库结构（幂等 CREATE TABLE IF NOT EXISTS）
-scripts/init-db.mjs      建库建表（容器启动时自动执行）
-scripts/seed.mjs         演示数据（多校区/减免/补订/转学/漏发/错领/换码/过敏）
-scripts/e2e-test.mjs     端到端工作流断言脚本
-src/app/api              Route Handlers（REST 风格 JSON API，Cookie 会话鉴权）
+db/schema.sql            数据库结构（幂等 CREATE TABLE IF NOT EXISTS；init-db 对旧库自动补列迁移）
+scripts/init-db.mjs      建库建表（容器启动时自动执行；含 plans/fitting_sessions/orders 新列迁移）
+scripts/seed.mjs         演示数据（多校区/减免/补订/转学/漏发/错领/换码/过敏/漏测补测/样衣/逾期/超时）
+scripts/e2e-test.mjs     端到端工作流断言脚本（58 项）
+src/app/api/makeup       补测：候选生成/排期调整/实测/双确认/复核/预锁延后/巡检/异常/样衣空闲资源
+src/app/makeup           补测管理页面（候选场次、补测学生、异常台账、班级数量重算、样衣与空闲）
+src/lib/makeup.ts        漏测识别、尺码一致性、竞争优先级、样衣占用、班级数量/批次/到校承诺重算
+src/app/api              其余 Route Handlers（REST 风格 JSON API，Cookie 会话鉴权）
 src/app/*                各角色前端页面
 src/lib                  db 连接池 / 鉴权 / API 包装 / 类型
 Dockerfile               多阶段构建（Next standalone）
 docker-compose.yml       mysql:8.4 + app，健康检查依赖，自动初始化
 ```
+
+> 生产构建本地验证：`npm run build && npm run start`（standalone），再 `npm run seed && npm run test:e2e`，
+> 与容器内运行方式一致。本仓库最近一次即以 standalone 生产模式跑通 58/58。

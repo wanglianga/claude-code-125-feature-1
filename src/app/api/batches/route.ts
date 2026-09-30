@@ -42,7 +42,7 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
     for (const ln of lines) {
       const qty = Number(ln.qty);
       if (!ln.plan_item_id || !ln.size || qty <= 0) continue;
-      // 取该品类+尺码下 已缴费订单 且未被批次占满的明细，按下单时间 FIFO
+      // 取该品类+尺码下 已缴费、在校、尺码已正式锁定（漏测风险占位/待复核不计正式数量）的明细，按下单时间 FIFO
       const [cands]: any = await conn.query(
         `SELECT oi.id, oi.qty,
                 oi.qty - COALESCE((SELECT SUM(ba.qty) FROM batch_allocations ba
@@ -53,6 +53,7 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
            JOIN orders o ON o.id=oi.order_id
            JOIN students st ON st.id=o.student_id
           WHERE oi.plan_item_id=? AND oi.size=? AND o.status='paid' AND st.status='active'
+            AND o.size_lock NOT IN ('risk_placeholder','review')
          HAVING remain > 0
           ORDER BY o.paid_at, o.id`,
         [ln.plan_item_id, ln.size]);

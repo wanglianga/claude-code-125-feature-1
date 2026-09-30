@@ -79,6 +79,25 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
       [payable, subsidy, Math.round((payable - subsidy) * 100) / 100, oid]);
     return oid;
   });
-  await logActivity({ student_id: student.id, order_id: orderId, actor: user, action: '家长创建订单', detail: plan.name });
+  // 集中试穿漏测：无该计划试穿（含补测）记录的学生，订单自动标记“风险占位”，
+  // 家长只能提交参考尺码，供应商不得计入正式生产数量，并进入补测台账
+  const fitted = await one(
+    `SELECT 1 FROM fitting_records fr JOIN fitting_sessions fs ON fs.id=fr.session_id
+      WHERE fr.student_id=? AND fs.plan_id=? LIMIT 1`,
+    [student.id, plan.id]);
+  if (!fitted) {
+    const firstOrder = await one(`SELECT COUNT(*) c FROM orders WHERE student_id=? AND id<>? AND status='paid'`,
+      [student.id, orderId]);
+    await tx(async (conn) => {
+      await conn.query("UPDATE orders SET size_lock='risk_placeholder', risk_placeholder=1 WHERE id=?", [orderId]);
+      await conn.query(
+        `INSERT INTO makeup_students (makeup_session_id,plan_id,student_id,class_id,order_id,is_first_order,status)
+         VALUES (NULL,?,?,?,?,?, 'pending_ref')
+         ON DUPLICATE KEY UPDATE order_id=VALUES(order_id)`,
+        [plan.id, student.id, student.class_id, orderId, Number(firstOrder?.c || 0) === 0 ? 1 : 0]);
+    });
+  }
+  await logActivity({ student_id: student.id, order_id: orderId, actor: user, action: '家长创建订单',
+    detail: fitted ? plan.name : `${plan.name}（集中试穿漏测，已置风险占位，等待补测，不计正式生产数量）` });
   return ok({ id: orderId });
 }, ['parent', 'admin', 'general_affairs']);

@@ -19,7 +19,7 @@ export default function PlansPage() {
   const { show, node } = useToast();
   const [f, setF] = useState<any>({
     name: '', kind: 'annual', academic_year: '2026-2027', season: '春秋',
-    supplier_id: '', order_deadline: '2026-11-15 18:00:00', fitting_date: '', note: '',
+    supplier_id: '', order_deadline: '2026-11-15 18:00:00', production_deadline: '', fitting_date: '', note: '',
     campus_ids: [], grade_ids: [],
     items: [{ name: '', suit_kind: 'sportswear', garment_type: 'top', price: 100, required: 1 }],
   });
@@ -77,7 +77,7 @@ export default function PlansPage() {
               </div>
             </div>
             <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
-              订购截止：{p.order_deadline}　试穿日：{p.fitting_date || '待定'}　{p.note}
+              订购截止：{p.order_deadline}　生产锁定截止：{p.production_deadline || '未设'}　试穿日：{p.fitting_date || '待定'}　{p.note}
             </div>
           </div>
         ))}
@@ -102,6 +102,7 @@ export default function PlansPage() {
               </select>
             </div>
             <div className="field"><label>订购截止时间</label><input value={f.order_deadline} onChange={(e) => setF({ ...f, order_deadline: e.target.value })} /></div>
+            <div className="field"><label>班级生产锁定截止日</label><input placeholder="如 2026-11-10 18:00:00" value={f.production_deadline} onChange={(e) => setF({ ...f, production_deadline: e.target.value })} /></div>
             <div className="field"><label>试穿日期</label><input type="date" value={f.fitting_date || ''} onChange={(e) => setF({ ...f, fitting_date: e.target.value })} /></div>
             <div className="field"><label>说明</label><input value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} /></div>
           </div>
