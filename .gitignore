@@ -33,3 +33,6 @@ temp/
 *debug*
 *temp*
 *tmp*
+
+# TS incremental build artifact
+tsconfig.tsbuildinfo

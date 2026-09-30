@@ -75,7 +75,7 @@ const find = (arr, pred) => { const r = arr.find(pred); if (!r) throw new Error(
 
   // 4. 供应商为林小雨明细建新批次（未分配的 120/120/33）
   console.log('④ 新批次：自动分配 FIFO');
-  const p1 = find((await req('GET', '/api/plans')).plans, (p) => p.kind === 'annual');
+  const p1 = find((await req('GET', '/api/plans')).plans, (p) => p.kind === 'annual' && p.status === 'open');
   const pd = await req('GET', `/api/plans/${p1.id}`);
   const itemTop = find(pd.items, (i) => i.name === '春秋运动上衣');
   const itemPants = find(pd.items, (i) => i.name === '春秋运动长裤');
@@ -271,6 +271,123 @@ const find = (arr, pred) => { const r = arr.find(pred); if (!r) throw new Error(
   check('看板含缴费/试穿/签收列', chenRow.paid_cnt >= 1 && Number(chenRow.fitted) >= 1, JSON.stringify(chenRow));
   const classRow = find(r.classes, (x) => x.class_name === '一(1)班');
   check('班级汇总存在', classRow.students >= 4);
+
+  // 12. 集中试穿漏测：补测与生产锁定
+  console.log('⑫ 集中补测与生产锁定');
+  const allClasses = (await req('GET', '/api/classes')).classes;
+  const c11b = find(allClasses, (c) => c.name === '一(1)班');
+  const c21b = find(allClasses, (c) => c.name === '二(1)班');
+
+  await login('zw');
+  r = await req('GET', `/api/makeup?plan_id=${p1.id}`);
+  const mkOf = (nm) => find(r.students, (x) => x.student_name === nm);
+  const han = mkOf('韩梅梅'), luo = mkOf('罗小宇'), gao = mkOf('高天天'), feng = mkOf('冯笑笑');
+  check('漏测学生登记为参考尺码风险占位', [han, luo, gao, feng].every((x) => x.status === 'referenced' && x.production_lock === 'placeholder'));
+  check('首次/非首次订购判定', han.is_first_order === 1 && luo.is_first_order === 0, JSON.stringify({ h: han.is_first_order, l: luo.is_first_order }));
+
+  // 供应商风险看板：占位不计入正式数量
+  await login('gys');
+  r = await req('GET', `/api/makeup-risk?plan_id=${p1.id}`);
+  check('风险看板列出占位学生', r.risk.some((x) => x.student_name === '韩梅梅'));
+  const line120 = find(r.lines, (l) => l.item_name === '春秋运动上衣' && l.size === '120');
+  check('120上衣正式数=1(林小雨) 占位=2(韩/冯)', Number(line120.formal_qty) === 1 && Number(line120.placeholder_qty) === 2, JSON.stringify(line120));
+  // 已缴费但风险占位的罗小宇(130)不能被 FIFO 投产
+  let mkErr = '';
+  try {
+    await req('POST', '/api/batches', { plan_id: p1.id, name: '占位拦截批次', lines: [{ plan_item_id: itemTop.id, size: '130', qty: 1 }] });
+  } catch (e) { mkErr = e.message; }
+  check('风险占位订单即使已缴费也不能投产', mkErr.includes('可投产数量不足'), mkErr);
+
+  // 二(1)班先确认 10-12 补测场，占用唯一一件130上衣样衣
+  await login('zw');
+  r = await req('POST', '/api/makeup', { action: 'generate', plan_id: p1.id, class_id: c21b.id });
+  const gaoCand = find(r.candidates, (c) => c.start_time.startsWith('2026-10-12'));
+  await req('POST', '/api/makeup', { action: 'confirm_candidate', session_id: gaoCand.id });
+  // 人工调整必须留原因
+  r = await req('GET', `/api/makeup?plan_id=${p1.id}`);
+  const gaoSession = find(r.sessions, (x) => x.class_name === '二(1)班');
+  await req('POST', '/api/makeup', { action: 'adjust', session_id: gaoSession.id, location: '明德校区体育馆B区-补测角', reason: '原场地临时用作疫苗接种，改到B区补测角' });
+  r = await req('GET', `/api/makeup?plan_id=${p1.id}`);
+  check('人工调整补测场保留原因', find(r.sessions, (x) => x.id === gaoSession.id).manual_adjust_reason.includes('疫苗接种'));
+
+  // 一(1)班生成候选：10-12 因130样衣被占不可行，10-13 可行；可见更高优先级竞争方
+  r = await req('POST', '/api/makeup', { action: 'generate', plan_id: p1.id, class_id: c11b.id });
+  check('一(1)班生成候选', r.candidates.length === 2, JSON.stringify(r.candidates.map((c) => c.start_time)));
+  const bad = r.candidates.find((c) => !c.feasible);
+  const good = r.candidates.find((c) => c.feasible);
+  check('同窗候选因130样衣竞争被标不足', !!bad && bad.shortages.some((s) => s.size === '130' && s.avail === 0), JSON.stringify(bad?.shortages));
+  check('不可行候选展示竞争班级，可行候选在次日早晨',
+    !!bad && bad.competing.some((x) => x.class_name === '二(1)班')
+    && !!good && good.start_time.startsWith('2026-10-13') && good.priority_detail.includes('首次订购'),
+    JSON.stringify({ bad: bad?.competing, good: good?.start_time }));
+  let confirmBlocked = '';
+  try { await req('POST', '/api/makeup', { action: 'confirm_candidate', session_id: bad.id }); } catch (e) { confirmBlocked = e.message; }
+  check('样衣不足候选不能确认', confirmBlocked.includes('样衣'));
+  await req('POST', '/api/makeup', { action: 'confirm_candidate', session_id: good.id });
+  r = await req('GET', `/api/makeup-exceptions?plan_id=${p1.id}`);
+  check('样衣不足形成可追溯异常', r.exceptions.some((e) => e.type === 'sample_shortage'), JSON.stringify(r.exceptions.map((e) => e.type)));
+
+  // 韩梅梅：班主任录入→确认测量→家长一致确认→正式锁定
+  await login('wangls');
+  await req('POST', `/api/makeup/${han.id}`, { id: han.id, action: 'record', size_top: '120', size_pants: '120', size_shoes: '33', staff_name: '王老师' });
+  await req('POST', `/api/makeup/${han.id}`, { id: han.id, action: 'teacher_confirm' });
+  await login('han_ma');
+  await req('POST', `/api/makeup/${han.id}`, { id: han.id, action: 'parent_confirm', sizes: { top: '120', pants: '120', shoes: '33' } });
+  r = await req('GET', `/api/orders/${han.order_id}`);
+  check('两次确认一致→订单正式锁定可投产', r.makeup.status === 'locked' && r.order.production_lock === 'locked' && r.order.status === 'paid', JSON.stringify(r.order.status));
+
+  // 罗小宇：两次确认不一致 → 待复核，供应商不能锁定
+  await login('wangls');
+  await req('POST', `/api/makeup/${luo.id}`, { id: luo.id, action: 'record', size_top: '130', size_pants: '130', size_shoes: '34', staff_name: '王老师' });
+  await req('POST', `/api/makeup/${luo.id}`, { id: luo.id, action: 'teacher_confirm' });
+  await login('luo_ba');
+  r = await req('POST', `/api/makeup/${luo.id}`, { id: luo.id, action: 'parent_confirm', sizes: { top: '140', pants: '130', shoes: '34' } });
+  check('家长确认与测量不一致标记 mismatch', r.mismatch === true);
+  r = await req('GET', `/api/orders/${luo.order_id}`);
+  check('不一致→订单待复核且未锁定', r.order.status === 'review' && r.order.production_lock === 'placeholder');
+  await login('gys');
+  r = await req('GET', '/api/dashboard/production-blockers');
+  check('投产限制明确提示待复核不能锁定', r.blocked.some((b) => b.student_name === '罗小宇' && b.block_reason.includes('待复核')));
+  await login('gys');
+  r = await req('GET', `/api/makeup-risk?plan_id=${p1.id}`);
+  check('风险看板统计待复核数量', Number(r.totals.review) >= 1);
+  // 总务复核裁决采用班主任尺码
+  await login('zw');
+  await req('POST', `/api/makeup/${luo.id}`, { id: luo.id, action: 'review', decision: 'use_teacher', reason: '现场复测130合体，家长误填140，采用班主任测量' });
+  r = await req('GET', `/api/orders/${luo.order_id}`);
+  check('复核裁决后锁定为130', r.makeup.status === 'locked' && r.order.production_lock === 'locked');
+  check('不一致异常被关闭', (await req('GET', `/api/makeup-exceptions?plan_id=${p1.id}`)).exceptions.filter((e) => e.student_name === '罗小宇').every((e) => e.status === 'resolved'));
+
+  // 冯笑笑：总务按参考尺码预锁（截止日处置，留痕+重算影响）
+  await req('POST', `/api/makeup/${feng.id}`, { id: feng.id, action: 'prelock', reason: '生产截止日已到家长仍未补测，按其参考尺码预锁', promised_arrival: '2026-11-12' });
+  r = await req('GET', `/api/orders/${feng.order_id}`);
+  check('按参考尺码预锁可投产且影响留痕', r.order.production_lock === 'prelocked' && r.mkDecisions.some((d) => d.impact.includes('正式可生产')), JSON.stringify(r.mkDecisions));
+  // 高天天：总务延后，退出本批生产
+  await req('POST', `/api/makeup/${gao.id}`, { id: gao.id, action: 'defer', reason: '家长申请延后到下学期补订批次' });
+  r = await req('GET', `/api/orders/${gao.order_id}`);
+  check('延后学生生产锁定为deferred', r.order.production_lock === 'deferred');
+
+  // 班级数量重算 + 看板
+  r = await req('GET', `/api/makeup?plan_id=${p1.id}`);
+  const cs11 = find(r.classSummary, (c) => c.class_name === '一(1)班');
+  const cs21 = find(r.classSummary, (c) => c.class_name === '二(1)班');
+  check('一(1)班风险占位清零、含预锁', cs11.placeholder_orders === 0 && cs11.formal_orders >= 4, JSON.stringify(cs11));
+  check('二(1)班延后1人', cs21.deferred_orders === 1, JSON.stringify(cs21));
+  r = await req('GET', `/api/dashboard/progress?plan_id=${p1.id}`);
+  check('看板班级含补测统计', find(r.classes, (c) => c.class_name === '二(1)班').makeup_open !== undefined);
+
+  // 完成补测场释放样衣（未被选择的候选场保持 candidate，不影响已安排场）
+  r = await req('GET', `/api/makeup?plan_id=${p1.id}`);
+  const arranged = r.sessions.filter((x) => (x.class_name === '一(1)班' || x.class_name === '二(1)班') && x.status !== 'candidate' && x.status !== 'cancelled');
+  for (const s of arranged) {
+    if (s.status === 'confirmed' || s.status === 'adjusted') {
+      await req('POST', '/api/makeup', { action: 'complete', session_id: s.id });
+    }
+  }
+  r = await req('GET', `/api/makeup?plan_id=${p1.id}`);
+  const arrangedAfter = r.sessions.filter((x) => (x.class_name === '一(1)班' || x.class_name === '二(1)班') && x.status !== 'candidate' && x.status !== 'cancelled');
+  check('已安排补测场完成并释放样衣', arrangedAfter.length >= 2 && arrangedAfter.every((x) => x.status === 'completed'),
+    JSON.stringify(arrangedAfter.map((x) => `${x.class_name}:${x.status}`)));
 
   console.log(`\n结果：${pass} 通过, ${fail} 失败`);
   process.exit(fail ? 1 : 0);

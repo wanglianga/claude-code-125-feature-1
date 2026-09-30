@@ -320,6 +320,105 @@ await ins('aftersales_cases', {
   description: '试穿建议150码，实际成衣版型偏小穿着紧绷，申请更换160码', created_by: zheng_ba,
 });
 
+// ========== 集中试穿漏测：补测与生产锁定 演示数据 ==========
+// 新增家长 + 漏测学生：一(1)班 韩梅梅（首次订购）、罗小宇（非首次订购，有历史订单）
+const han_ma = await U('han_ma', '韩梅梅妈妈', 'parent', { phone: '13900000009' });
+const luo_ba = await U('luo_ba', '罗小宇爸爸', 'parent', { phone: '13900000010' });
+const s_han = await mkStudent('MD10105', '韩梅梅', campus1, g1, c11, han_ma, { h: 126, w: 25, usual: '120' });
+const s_luo = await mkStudent('MD10106', '罗小宇', campus1, g1, c11, luo_ba, { h: 135, w: 30, usual: '130' });
+// 二(1)班 漏测学生 高天天（首次订购），与一(1)班竞争同一批样衣/同一时段
+const gao_ma = await U('gao_ma', '高天天妈妈', 'parent', { phone: '13900000011' });
+const s_gao = await mkStudent('MD20104', '高天天', campus1, g2, c21, gao_ma, { h: 138, w: 31, usual: '140' });
+// 一(1)班 漏测学生 冯笑笑（首次订购，已缴费），用于截止日"按参考尺码预锁"演示
+const feng_ma = await U('feng_ma', '冯笑笑妈妈', 'parent', { phone: '13900000012' });
+const s_feng = await mkStudent('MD10107', '冯笑笑', campus1, g1, c11, feng_ma, { h: 122, w: 23, usual: '120' });
+
+// 罗小宇有一笔历史学年有效订单 → 非首次订购
+const pOld = await ins('plans', {
+  name: '2025学年度校服采购（历史）', kind: 'annual', academic_year: '2025-2026',
+  season: '春秋', supplier_id: supplier, status: 'closed',
+  order_deadline: '2025-10-15 18:00:00', fitting_date: '2025-10-08', created_by: zw,
+});
+await ins('plan_campuses', { plan_id: pOld, campus_id: campus1 });
+const oLuoOld = await ins('orders', {
+  order_no: 'OD20250099', plan_id: pOld, student_id: s_luo, class_id: c11, status: 'paid',
+  payable_amount: 200, subsidy_amount: 0, due_amount: 200, paid_amount: 200,
+  confirmed_at: '2025-09-20 09:00:00', paid_at: '2025-09-21 09:00:00',
+});
+
+// 漏测学生本计划订单：韩梅梅(120/33，已缴费)、罗小宇(130/34，已缴费)、高天天(140/35，待缴费)
+const oHan = await mkOrder('OD20260009', p1, s_han, c11, 'paid', [
+  { item: iTop, type: 'top', name: '春秋运动上衣', size: '120', price: 120 },
+  { item: iPants, type: 'pants', name: '春秋运动长裤', size: '120', price: 80 },
+  { item: iShoes, type: 'shoes', name: '校鞋', size: '33', price: 180 },
+]);
+const oLuo = await mkOrder('OD20260010', p1, s_luo, c11, 'paid', [
+  { item: iTop, type: 'top', name: '春秋运动上衣', size: '130', price: 120 },
+  { item: iPants, type: 'pants', name: '春秋运动长裤', size: '130', price: 80 },
+  { item: iShoes, type: 'shoes', name: '校鞋', size: '34', price: 180 },
+]);
+const oGao = await mkOrder('OD20260011', p1, s_gao, c21, 'confirmed', [
+  { item: iTop, type: 'top', name: '春秋运动上衣', size: '130', price: 120 },
+  { item: iPants, type: 'pants', name: '春秋运动长裤', size: '130', price: 80 },
+  { item: iShoes, type: 'shoes', name: '校鞋', size: '34', price: 180 },
+]);
+const oFeng = await mkOrder('OD20260012', p1, s_feng, c11, 'paid', [
+  { item: iTop, type: 'top', name: '春秋运动上衣', size: '120', price: 120 },
+  { item: iPants, type: 'pants', name: '春秋运动长裤', size: '120', price: 80 },
+  { item: iShoes, type: 'shoes', name: '校鞋', size: '33', price: 180 },
+]);
+
+// 班主任空闲时段：王老师(一1班) 与 赵老师(二1班) 在同一时间窗空闲 → 时段竞争
+await ins('teacher_slots', { teacher_user_id: wangls, campus_id: campus1, start_time: '2026-10-12 15:00:00', end_time: '2026-10-12 17:00:00', note: '周一教研后空闲' });
+await ins('teacher_slots', { teacher_user_id: wangls, campus_id: campus1, start_time: '2026-10-13 09:00:00', end_time: '2026-10-13 10:30:00', note: '备选时段（次日早晨，不与二(1)班冲突）' });
+await ins('teacher_slots', { teacher_user_id: zhaols, campus_id: campus1, start_time: '2026-10-12 15:00:00', end_time: '2026-10-12 17:00:00', note: '与一(1)班同窗' });
+
+// 样衣库存：120 充足；130 上衣仅 1 件（一(1)班罗小宇与二(1)班高天天同窗竞争会不足）
+await ins('sample_stocks', { plan_id: p1, campus_id: campus1, supplier_id: supplier, plan_item_id: iTop, size: '120', total_qty: 4 });
+await ins('sample_stocks', { plan_id: p1, campus_id: campus1, supplier_id: supplier, plan_item_id: iPants, size: '120', total_qty: 4 });
+await ins('sample_stocks', { plan_id: p1, campus_id: campus1, supplier_id: supplier, plan_item_id: iShoes, size: '33', total_qty: 4 });
+await ins('sample_stocks', { plan_id: p1, campus_id: campus1, supplier_id: supplier, plan_item_id: iTop, size: '130', total_qty: 1 });
+await ins('sample_stocks', { plan_id: p1, campus_id: campus1, supplier_id: supplier, plan_item_id: iPants, size: '130', total_qty: 4 });
+await ins('sample_stocks', { plan_id: p1, campus_id: campus1, supplier_id: supplier, plan_item_id: iShoes, size: '34', total_qty: 4 });
+await ins('sample_stocks', { plan_id: p1, campus_id: campus1, supplier_id: supplier, plan_item_id: iTop, size: '140', total_qty: 4 });
+await ins('sample_stocks', { plan_id: p1, campus_id: campus1, supplier_id: supplier, plan_item_id: iPants, size: '140', total_qty: 4 });
+await ins('sample_stocks', { plan_id: p1, campus_id: campus1, supplier_id: supplier, plan_item_id: iShoes, size: '35', total_qty: 4 });
+
+// 班级生产截止日与到校承诺（一(1)班截止日已到，用于演示 deadline_open 与总务预锁/延后）
+await ins('class_production_settings', { plan_id: p1, class_id: c11, production_deadline: '2026-09-29 18:00:00', promised_arrival: '2026-11-05', updated_by: zw });
+await ins('class_production_settings', { plan_id: p1, class_id: c21, production_deadline: '2026-10-16 18:00:00', promised_arrival: '2026-11-06', updated_by: zw });
+
+// 漏测学生标记为补测中、已交参考尺码（风险占位）；参考尺码取自其订单明细
+const mkRef = async (student, cls, order, first) => {
+  const its = Object.fromEntries(
+    (await conn.query('SELECT garment_type, size FROM order_items WHERE order_id=?', [order]))[0]
+      .map((r) => [r.garment_type, r.size]));
+  return ins('makeup_students', {
+    plan_id: p1, student_id: student, class_id: cls, order_id: order, is_first_order: first ? 1 : 0,
+    status: 'referenced',
+    ref_size_top: its.top || null, ref_size_pants: its.pants || null,
+    ref_size_skirt: its.skirt || null, ref_size_coat: its.coat || null, ref_size_shoes: its.shoes || null,
+    ref_submitted_at: '2026-10-09 09:00:00',
+  });
+};
+await mkRef(s_han, c11, oHan, 1);
+await mkRef(s_luo, c11, oLuo, 0);
+await mkRef(s_gao, c21, oGao, 1);
+await mkRef(s_feng, c11, oFeng, 1);
+// 漏测订单一律风险占位（不计正式数量，即使已缴费）
+await conn.query("UPDATE orders SET production_lock='placeholder' WHERE id IN (?,?,?,?)", [oHan, oLuo, oGao, oFeng]);
+
+// p2（毕业班补订）补一个常规试穿场，避免马奔被识别为漏测（演示聚焦 p1）
+await ins('fitting_sessions', {
+  plan_id: p2, class_id: c61, start_time: '2026-10-06 09:00:00', end_time: '2026-10-06 10:00:00',
+  location: '知行校区体育馆', organizer_user_id: qianls,
+});
+// 马奔试穿记录（与订单一致 170）
+await ins('fitting_records', {
+  session_id: (await conn.query('SELECT id FROM fitting_sessions WHERE plan_id=? ORDER BY id DESC LIMIT 1', [p2]))[0][0].id,
+  student_id: s_ma, staff_name: '试穿员小周', size_top: '170', size_pants: '170',
+});
+
 // ---------- 往期供应商考核 ----------
 await ins('supplier_assessments', {
   supplier_id: supplier, period: '2025-2026学年度', score: 92.5,
@@ -335,8 +434,12 @@ await log({ role: 'head_teacher', name: '班主任王老师' }, '安排试穿时
 await log({ role: 'general_affairs', name: '试穿员小刘' }, '登记试穿尺码建议', '上衣130 裤130 外套140 鞋34', s_chen);
 await log({ role: 'factory', name: '工厂张调度' }, '批次报产', 'PB20260001 全部完成，预计10月20日到校');
 await log({ role: 'general_affairs', name: '总务赵主任' }, '学生转学', '周悦转学，订单 OD20260004 挂起并发起退款', s_zhou, oZhou);
+await log({ role: 'parent', name: '韩梅梅妈妈' }, '家长提交参考尺码（风险占位）', '漏测补测前仅交参考尺码，不计入正式生产数量', s_han, oHan);
+await log({ role: 'parent', name: '罗小宇爸爸' }, '家长提交参考尺码（风险占位）', '非首次订购，等待集中补测', s_luo, oLuo);
+await log({ role: 'parent', name: '高天天妈妈' }, '家长提交参考尺码（风险占位）', '二(1)班漏测，与一(1)班竞争130码样衣', s_gao, oGao);
+await log({ role: 'parent', name: '冯笑笑妈妈' }, '家长提交参考尺码（风险占位）', '一(1)班漏测，等待截止日前补测或预锁', s_feng, oFeng);
 
 console.log('[seed] done. 测试账号密码统一为: uniform123');
-console.log('[seed] 家长: chen_ma/lin_ba/wu_ma/zhou_ma/zheng_ba/sun_ma/he_ma/ma_ba');
+console.log('[seed] 家长: chen_ma/lin_ba/wu_ma/zhou_ma/zheng_ba/sun_ma/he_ma/ma_ba/han_ma/luo_ba/gao_ma/feng_ma');
 console.log('[seed] 老师: wangls/zhaols/qianls  总务: zw  供应商: gys  工厂: gc  售后: kf  管理员: admin');
 await conn.end();

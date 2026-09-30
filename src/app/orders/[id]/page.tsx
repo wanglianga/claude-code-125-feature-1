@@ -99,6 +99,49 @@ export default function OrderDetailPage() {
         </table>
       </div>
 
+      {d.makeup && (
+        <div className="card">
+          <h2>集中试穿漏测 · 补测与生产锁定</h2>
+          <div className="grid grid-4">
+            <div className="stat"><div className="num"><Badge status={d.makeup.status} /></div><div className="lbl">补测状态{d.makeup.is_first_order ? ' · 首次订购' : ' · 非首次订购'}</div></div>
+            <div className="stat"><div className="num">{d.makeup.production_lock && d.makeup.production_lock !== 'none' ? <Badge status={d.makeup.production_lock} /> : '未锁定'}</div><div className="lbl">生产锁定</div></div>
+            <div className="stat"><div className="num" style={{ fontSize: 14 }}>{d.makeup.makeup_start || '未安排'}</div><div className="lbl">补测场 {d.makeup.makeup_location || ''}</div></div>
+            <div className="stat"><div className="num" style={{ fontSize: 13 }}>{d.makeup.mismatch ? '两次确认不一致' : (d.makeup.f_confirmed_at ? '两次确认一致' : '待确认')}</div><div className="lbl">家长/班主任确认</div></div>
+          </div>
+          <table>
+            <thead><tr><th>环节</th><th>上衣</th><th>裤子</th><th>裙装</th><th>外套</th><th>鞋码</th><th>时间/说明</th></tr></thead>
+            <tbody>
+              <tr><td>家长参考尺码（风险占位）</td>
+                <td>{d.makeup.ref_size_top || '—'}</td><td>{d.makeup.ref_size_pants || '—'}</td><td>{d.makeup.ref_size_skirt || '—'}</td>
+                <td>{d.makeup.ref_size_coat || '—'}</td><td>{d.makeup.ref_size_shoes || '—'}</td>
+                <td className="muted">{d.makeup.ref_submitted_at || ''}</td></tr>
+              <tr><td>班主任测量并确认</td>
+                <td>{d.makeup.m_size_top || '—'}</td><td>{d.makeup.m_size_pants || '—'}</td><td>{d.makeup.m_size_skirt || '—'}</td>
+                <td>{d.makeup.m_size_coat || '—'}</td><td>{d.makeup.m_size_shoes || '—'}</td>
+                <td className="muted">{d.makeup.m_confirmed_at || (d.makeup.m_recorded_at ? '已录入待确认' : '')}</td></tr>
+              <tr><td>家长最终确认</td>
+                <td>{d.makeup.f_size_top || '—'}</td><td>{d.makeup.f_size_pants || '—'}</td><td>{d.makeup.f_size_skirt || '—'}</td>
+                <td>{d.makeup.f_size_coat || '—'}</td><td>{d.makeup.f_size_shoes || '—'}</td>
+                <td className="muted">{d.makeup.f_confirmed_at || ''}{d.makeup.decision_reason ? `｜裁决：${d.makeup.decision_reason}` : ''}</td></tr>
+            </tbody>
+          </table>
+          {d.mkDecisions?.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <h3>总务处置与影响留痕</h3>
+              {d.mkDecisions.map((md: any) => (
+                <div key={md.id} className="ev">
+                  <div><b>{md.decision === 'prelock' ? '按参考尺码预锁' : md.decision === 'defer' ? '延后' : '复核裁决'}（{md.decider_name}）</b></div>
+                  <div className="muted">原因：{md.reason}</div>
+                  {md.impact && <div className="muted">影响：{md.impact}</div>}
+                  <div className="t">{md.decided_at}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ marginTop: 8 }}><Link className="btn secondary sm" href="/makeup">前往集中补测处理 ›</Link></div>
+        </div>
+      )}
+
       <div className="card">
         <h2>关联售后工单</h2>
         {d.cases.length ? (

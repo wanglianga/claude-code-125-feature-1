@@ -42,7 +42,8 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
     for (const ln of lines) {
       const qty = Number(ln.qty);
       if (!ln.plan_item_id || !ln.size || qty <= 0) continue;
-      // 取该品类+尺码下 已缴费订单 且未被批次占满的明细，按下单时间 FIFO
+      // 取该品类+尺码下 可正式投产订单 且未被批次占满的明细，按下单时间 FIFO
+      // 风险占位（补测前参考尺码）/延后 学生即使已缴费也不计入正式数量；待复核订单 status=review 已被排除
       const [cands]: any = await conn.query(
         `SELECT oi.id, oi.qty,
                 oi.qty - COALESCE((SELECT SUM(ba.qty) FROM batch_allocations ba
@@ -53,6 +54,7 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
            JOIN orders o ON o.id=oi.order_id
            JOIN students st ON st.id=o.student_id
           WHERE oi.plan_item_id=? AND oi.size=? AND o.status='paid' AND st.status='active'
+            AND o.production_lock NOT IN ('placeholder','deferred')
          HAVING remain > 0
           ORDER BY o.paid_at, o.id`,
         [ln.plan_item_id, ln.size]);
@@ -69,7 +71,7 @@ export const POST = api(async (_req: NextRequest, body: any, user) => {
         need -= take;
       }
       if (need > 0) {
-        throw Object.assign(new Error(`品类#${ln.plan_item_id} 尺码 ${ln.size} 可投产数量不足，还差 ${need} 件（未缴费/挂起订单不计入）`), { status: 400 });
+        throw Object.assign(new Error(`品类#${ln.plan_item_id} 尺码 ${ln.size} 可投产数量不足，还差 ${need} 件（未缴费/挂起/待复核/补测风险占位/延后订单不计入正式数量）`), { status: 400 });
       }
     }
     return batchId;

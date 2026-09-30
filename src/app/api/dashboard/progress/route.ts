@@ -20,7 +20,7 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
   if (user.role === 'supplier' || user.role === 'factory') { where.push('p.supplier_id=?'); whereArgs.push(user.supplier_id); }
   const WHERE = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
-  const subArgs = planId ? [planId, planId, planId] : [];
+  const subArgs = planId ? [planId, planId, planId, planId, planId] : [];
   const studentRows = await query(
     `SELECT s.id, s.name, s.student_no, s.status student_status,
             c.name class_name, g.name grade_name, cp.name campus_name,
@@ -42,7 +42,9 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
               WHERE o2.student_id=s.id ${planId ? 'AND pb.plan_id=?' : ''}) producing_qty,
             (SELECT COALESCE(SUM(oi.signed_qty),0) FROM order_items oi JOIN orders o2 ON o2.id=oi.order_id
               WHERE o2.student_id=s.id ${planId ? 'AND o2.plan_id=?' : ''}) signed_qty,
-            (SELECT COUNT(*) FROM aftersales_cases ac WHERE ac.student_id=s.id AND ac.status IN ('open','processing')) open_cases
+            (SELECT COUNT(*) FROM aftersales_cases ac WHERE ac.student_id=s.id AND ac.status IN ('open','processing')) open_cases,
+            (SELECT mk.status FROM makeup_students mk WHERE mk.student_id=s.id ${planId ? 'AND mk.plan_id=?' : ''} ORDER BY mk.id DESC LIMIT 1) makeup_status,
+            (SELECT COALESCE(MAX(o3.production_lock),'none') FROM orders o3 WHERE o3.student_id=s.id ${planId ? 'AND o3.plan_id=?' : ''}) production_lock
        FROM students s
        JOIN classes c ON c.id=s.class_id
        JOIN grades g ON g.id=s.grade_id
@@ -68,7 +70,15 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
             (SELECT COUNT(DISTINCT s2.id) FROM students s2
                JOIN fitting_records fr ON fr.student_id=s2.id
                JOIN fitting_sessions fs ON fs.id=fr.session_id
-              WHERE fs.class_id=c.id ${planId ? 'AND fs.plan_id=?' : ''}) fitted_students
+              WHERE fs.class_id=c.id ${planId ? 'AND fs.plan_id=?' : ''}) fitted_students,
+            (SELECT COUNT(*) FROM makeup_students mk
+              WHERE mk.class_id=c.id ${planId ? 'AND mk.plan_id=?' : ''}
+                AND mk.status IN ('need_makeup','referenced','scheduled','measured','review')) makeup_open,
+            (SELECT COUNT(*) FROM makeup_students mk
+              WHERE mk.class_id=c.id ${planId ? 'AND mk.plan_id=?' : ''}
+                AND mk.status IN ('locked','prelocked')) makeup_closed,
+            (SELECT COUNT(*) FROM makeup_exceptions e
+              WHERE e.class_id=c.id AND e.status='open' ${planId ? 'AND e.plan_id=?' : ''}) makeup_exc
        FROM classes c
        JOIN grades g ON g.id=c.grade_id
        JOIN campuses cp ON cp.id=g.campus_id
@@ -76,7 +86,7 @@ export const GET = api(async (req: NextRequest, _b: any, user) => {
        LEFT JOIN orders o ON o.student_id=s.id ${planId ? 'AND o.plan_id=?' : ''}
        ${cWhere.length ? 'WHERE ' + cWhere.join(' AND ') : ''}
        GROUP BY c.id ORDER BY cp.id, g.id, c.id`,
-    [...(planId ? [planId, planId] : []), ...cArgs]);
+    [...(planId ? [planId, planId, planId, planId, planId] : []), ...cArgs]);
 
   return ok({ students: studentRows, classes: classRows });
 });

@@ -97,6 +97,8 @@ CREATE TABLE IF NOT EXISTS plans (
   status ENUM('draft','open','closed') NOT NULL DEFAULT 'draft',
   order_deadline DATETIME NOT NULL,
   fitting_date DATE NULL,
+  teacher_confirm_hours INT NOT NULL DEFAULT 24 COMMENT '补测后班主任确认测量记录的时限（小时）',
+  parent_confirm_hours INT NOT NULL DEFAULT 48 COMMENT '班主任确认后家长确认最终尺码的时限（小时）',
   note VARCHAR(300),
   created_by INT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -133,17 +135,19 @@ CREATE TABLE IF NOT EXISTS plan_items (
   CONSTRAINT fk_pi_plan FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 试穿时段（班主任按时段组织）
+-- 试穿时段（班主任按时段组织；kind=makeup 为集中试穿漏测后的补测场，关联 makeup_sessions）
 CREATE TABLE IF NOT EXISTS fitting_sessions (
   id INT AUTO_INCREMENT PRIMARY KEY,
   plan_id INT NOT NULL,
   class_id INT NOT NULL,
+  kind ENUM('regular','makeup') NOT NULL DEFAULT 'regular',
+  makeup_session_id INT NULL,
   start_time DATETIME NOT NULL,
   end_time DATETIME NOT NULL,
   location VARCHAR(100) NOT NULL,
   organizer_user_id INT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  INDEX (plan_id), INDEX (class_id),
+  INDEX (plan_id), INDEX (class_id), INDEX (makeup_session_id),
   CONSTRAINT fk_fs_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
   CONSTRAINT fk_fs_class FOREIGN KEY (class_id) REFERENCES classes(id),
   CONSTRAINT fk_fs_organizer FOREIGN KEY (organizer_user_id) REFERENCES users(id)
@@ -167,14 +171,17 @@ CREATE TABLE IF NOT EXISTS fitting_records (
   CONSTRAINT fk_fr_student FOREIGN KEY (student_id) REFERENCES students(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 订单（hold：迟缴费/转学等暂缓，供应商不可投产）
+-- 订单（hold：迟缴费/转学等暂缓，供应商不可投产；review：班主任与家长两次确认不一致待复核）
 CREATE TABLE IF NOT EXISTS orders (
   id INT AUTO_INCREMENT PRIMARY KEY,
   order_no VARCHAR(40) NOT NULL UNIQUE,
   plan_id INT NOT NULL,
   student_id INT NOT NULL,
   class_id INT NOT NULL,
-  status ENUM('draft','confirmed','paid','hold','cancelled') NOT NULL DEFAULT 'draft',
+  status ENUM('draft','confirmed','paid','hold','cancelled','review') NOT NULL DEFAULT 'draft',
+  -- 生产锁定：none 正常；placeholder 补测前参考尺码风险占位（不计正式数量）；
+  -- locked 双确认一致正式锁定；prelocked 总务批准按参考尺码预锁；deferred 总务批准延后
+  production_lock ENUM('none','placeholder','locked','prelocked','deferred') NOT NULL DEFAULT 'none',
   hold_reason VARCHAR(200),
   payable_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
   subsidy_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
@@ -421,6 +428,193 @@ CREATE TABLE IF NOT EXISTS activity_log (
   detail VARCHAR(500),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   INDEX (student_id), INDEX (order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============ 集中试穿漏测：补测与生产锁定 ============
+
+-- 班主任空闲时间（生成补测候选时段的输入之一）
+CREATE TABLE IF NOT EXISTS teacher_slots (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  teacher_user_id INT NOT NULL,
+  campus_id INT NOT NULL,
+  start_time DATETIME NOT NULL,
+  end_time DATETIME NOT NULL,
+  note VARCHAR(200),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX (teacher_user_id), INDEX (start_time),
+  CONSTRAINT fk_ts_teacher FOREIGN KEY (teacher_user_id) REFERENCES users(id),
+  CONSTRAINT fk_ts_campus FOREIGN KEY (campus_id) REFERENCES campuses(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 供应商样衣库存（按计划+校区+品类+尺码；多班竞争同一批样衣）
+CREATE TABLE IF NOT EXISTS sample_stocks (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  plan_id INT NOT NULL,
+  campus_id INT NOT NULL,
+  supplier_id INT NOT NULL,
+  plan_item_id INT NOT NULL,
+  size VARCHAR(20) NOT NULL,
+  total_qty INT NOT NULL DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_sample (plan_id, campus_id, plan_item_id, size),
+  INDEX (plan_id),
+  CONSTRAINT fk_ss_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_ss_campus FOREIGN KEY (campus_id) REFERENCES campuses(id),
+  CONSTRAINT fk_ss_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+  CONSTRAINT fk_ss_pi FOREIGN KEY (plan_item_id) REFERENCES plan_items(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 班级生产设置：班级生产截止日与到校承诺（计划×班级）
+CREATE TABLE IF NOT EXISTS class_production_settings (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  plan_id INT NOT NULL,
+  class_id INT NOT NULL,
+  production_deadline DATETIME NOT NULL,
+  promised_arrival DATE NULL,
+  updated_by INT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_cps (plan_id, class_id),
+  CONSTRAINT fk_cps_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_cps_class FOREIGN KEY (class_id) REFERENCES classes(id),
+  CONSTRAINT fk_cps_user FOREIGN KEY (updated_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 补测场（候选 candidate → 已确认 confirmed → 人工调整 adjusted → 完成 completed / 取消 cancelled）
+CREATE TABLE IF NOT EXISTS makeup_sessions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  makeup_no VARCHAR(40) NOT NULL UNIQUE,
+  plan_id INT NOT NULL,
+  class_id INT NOT NULL,
+  campus_id INT NOT NULL,
+  supplier_id INT NOT NULL,
+  start_time DATETIME NOT NULL,
+  end_time DATETIME NOT NULL,
+  location VARCHAR(100) NOT NULL,
+  organizer_user_id INT NULL,
+  status ENUM('candidate','confirmed','adjusted','completed','cancelled') NOT NULL DEFAULT 'candidate',
+  priority_score INT NOT NULL DEFAULT 0,
+  priority_detail VARCHAR(400),
+  manual_adjust_reason VARCHAR(300),
+  created_by INT NULL,
+  confirmed_at DATETIME NULL,
+  completed_at DATETIME NULL,
+  cancelled_at DATETIME NULL,
+  cancel_reason VARCHAR(300),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX (plan_id), INDEX (class_id), INDEX (status),
+  CONSTRAINT fk_ms_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_ms_class FOREIGN KEY (class_id) REFERENCES classes(id),
+  CONSTRAINT fk_ms_campus FOREIGN KEY (campus_id) REFERENCES campuses(id),
+  CONSTRAINT fk_ms_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+  CONSTRAINT fk_ms_organizer FOREIGN KEY (organizer_user_id) REFERENCES users(id),
+  CONSTRAINT fk_ms_creator FOREIGN KEY (created_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 补测学生（一个学生在一个计划下的补测/双确认/生产锁定链路）
+CREATE TABLE IF NOT EXISTS makeup_students (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  plan_id INT NOT NULL,
+  student_id INT NOT NULL,
+  class_id INT NOT NULL,
+  order_id INT NULL,
+  makeup_session_id INT NULL,
+  is_first_order TINYINT(1) NOT NULL DEFAULT 1,
+  status ENUM('need_makeup','referenced','scheduled','measured','locked','review','prelocked','deferred') NOT NULL DEFAULT 'need_makeup',
+  -- 家长补测前提交的参考尺码（仅风险占位，不计正式数量）
+  ref_size_top VARCHAR(20) NULL,
+  ref_size_pants VARCHAR(20) NULL,
+  ref_size_skirt VARCHAR(20) NULL,
+  ref_size_coat VARCHAR(20) NULL,
+  ref_size_shoes VARCHAR(20) NULL,
+  ref_submitted_at DATETIME NULL,
+  -- 班主任补测测量并确认的记录
+  m_size_top VARCHAR(20) NULL,
+  m_size_pants VARCHAR(20) NULL,
+  m_size_skirt VARCHAR(20) NULL,
+  m_size_coat VARCHAR(20) NULL,
+  m_size_shoes VARCHAR(20) NULL,
+  m_staff_name VARCHAR(60),
+  m_special_note VARCHAR(300),
+  m_recorded_at DATETIME NULL,
+  m_confirmed_at DATETIME NULL,
+  m_confirmed_by INT NULL,
+  -- 家长最终确认尺码
+  f_size_top VARCHAR(20) NULL,
+  f_size_pants VARCHAR(20) NULL,
+  f_size_skirt VARCHAR(20) NULL,
+  f_size_coat VARCHAR(20) NULL,
+  f_size_shoes VARCHAR(20) NULL,
+  f_confirmed_at DATETIME NULL,
+  f_confirmed_by INT NULL,
+  mismatch TINYINT(1) NOT NULL DEFAULT 0,
+  -- 总务复核裁决 / 截止日处置
+  review_resolution ENUM('use_teacher','use_parent','remeasure') NULL,
+  decision_reason VARCHAR(300),
+  decided_by INT NULL,
+  decided_at DATETIME NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_mk_student (plan_id, student_id),
+  INDEX (makeup_session_id), INDEX (status),
+  CONSTRAINT fk_mk_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_mk_student FOREIGN KEY (student_id) REFERENCES students(id),
+  CONSTRAINT fk_mk_class FOREIGN KEY (class_id) REFERENCES classes(id),
+  CONSTRAINT fk_mk_order FOREIGN KEY (order_id) REFERENCES orders(id),
+  CONSTRAINT fk_mk_session FOREIGN KEY (makeup_session_id) REFERENCES makeup_sessions(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 补测场对样衣的占用（同时段重叠的其他补测场不能重复占用）
+CREATE TABLE IF NOT EXISTS sample_reservations (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  makeup_session_id INT NOT NULL,
+  sample_stock_id INT NOT NULL,
+  qty INT NOT NULL DEFAULT 1,
+  status ENUM('held','released') NOT NULL DEFAULT 'held',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_sr (makeup_session_id, sample_stock_id),
+  INDEX (sample_stock_id),
+  CONSTRAINT fk_sr_session FOREIGN KEY (makeup_session_id) REFERENCES makeup_sessions(id) ON DELETE CASCADE,
+  CONSTRAINT fk_sr_stock FOREIGN KEY (sample_stock_id) REFERENCES sample_stocks(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 可追溯异常台账：补测逾期 / 样衣不足 / 班主任超时 / 家长超时 / 截止日未闭环 / 两次确认不一致
+CREATE TABLE IF NOT EXISTS makeup_exceptions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  exc_no VARCHAR(40) NOT NULL UNIQUE,
+  type ENUM('makeup_overdue','sample_shortage','teacher_timeout','parent_timeout','deadline_open','size_mismatch') NOT NULL,
+  status ENUM('open','acknowledged','resolved') NOT NULL DEFAULT 'open',
+  plan_id INT NOT NULL,
+  class_id INT NULL,
+  student_id INT NULL,
+  makeup_session_id INT NULL,
+  detail VARCHAR(500),
+  raised_by VARCHAR(30) NOT NULL DEFAULT 'system',
+  acknowledged_by INT NULL,
+  resolved_by INT NULL,
+  resolved_at DATETIME NULL,
+  resolution VARCHAR(300),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX (plan_id), INDEX (type), INDEX (status),
+  CONSTRAINT fk_ex_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_ex_class FOREIGN KEY (class_id) REFERENCES classes(id),
+  CONSTRAINT fk_ex_student FOREIGN KEY (student_id) REFERENCES students(id),
+  CONSTRAINT fk_ex_session FOREIGN KEY (makeup_session_id) REFERENCES makeup_sessions(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 总务处置留痕（按参考尺码预锁 / 延后 / 复核裁决）及重算影响（班级数量、批次、到校承诺）
+CREATE TABLE IF NOT EXISTS makeup_decisions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  makeup_student_id INT NOT NULL,
+  order_id INT NULL,
+  decision ENUM('prelock','defer','review_teacher','review_parent','review_remeasure') NOT NULL,
+  reason VARCHAR(300) NOT NULL,
+  impact VARCHAR(800),
+  decided_by INT NOT NULL,
+  decided_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX (makeup_student_id),
+  CONSTRAINT fk_md_mk FOREIGN KEY (makeup_student_id) REFERENCES makeup_students(id),
+  CONSTRAINT fk_md_order FOREIGN KEY (order_id) REFERENCES orders(id),
+  CONSTRAINT fk_md_user FOREIGN KEY (decided_by) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 SET FOREIGN_KEY_CHECKS = 1;

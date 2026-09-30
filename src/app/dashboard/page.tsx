@@ -41,7 +41,7 @@ export default function DashboardPage() {
       <div className="card">
         <h2>按班级汇总（缴费 · 试穿）</h2>
         <table>
-          <thead><tr><th>校区</th><th>年级</th><th>班级</th><th>学生数</th><th>订单数</th><th>已缴费</th><th>待缴费/挂起</th><th>已试穿人数</th></tr></thead>
+          <thead><tr><th>校区</th><th>年级</th><th>班级</th><th>学生数</th><th>订单数</th><th>已缴费</th><th>待缴费/挂起</th><th>已试穿人数</th><th>补测未闭环/异常</th></tr></thead>
           <tbody>
             {data.classes?.map((c: any) => (
               <tr key={c.id}>
@@ -50,6 +50,9 @@ export default function DashboardPage() {
                 <td><Badge status="paid" /> {c.paid_cnt}</td>
                 <td>{Number(c.pending_cnt) > 0 ? <span style={{ color: 'var(--amber)' }}>{c.pending_cnt}</span> : 0}</td>
                 <td>{c.fitted_students}</td>
+                <td>{Number(c.makeup_open) > 0 || Number(c.makeup_exc) > 0
+                  ? <span style={{ color: 'var(--red)' }}>补测 {c.makeup_open} · 异常 {c.makeup_exc}</span>
+                  : (Number(c.makeup_closed) > 0 ? <span style={{ color: 'var(--green)' }}>已闭环 {c.makeup_closed}</span> : '—')}</td>
               </tr>
             ))}
           </tbody>
@@ -61,7 +64,7 @@ export default function DashboardPage() {
         <table>
           <thead><tr>
             <th>学号</th><th>学生</th><th>班级</th><th>在校状态</th><th>订单</th>
-            <th>缴费</th><th>试穿</th><th>已投产(件)</th><th>已签收(件)</th><th>进行中售后</th>
+            <th>缴费</th><th>试穿</th><th>补测/生产锁定</th><th>已投产(件)</th><th>已签收(件)</th><th>进行中售后</th>
           </tr></thead>
           <tbody>
             {s.map((x: any) => (
@@ -78,6 +81,11 @@ export default function DashboardPage() {
                   {x.cancelled_cnt > 0 && <Badge status="cancelled" />}
                 </td>
                 <td>{x.fitted > 0 ? <Badge status="approved" /> : <span className="muted">未试穿</span>}</td>
+                <td>
+                  {x.makeup_status
+                    ? <span title={`生产锁定：${x.production_lock || 'none'}`}><Badge status={x.makeup_status} /></span>
+                    : <span className="muted">—</span>}
+                </td>
                 <td>{x.producing_qty}</td>
                 <td>{x.signed_qty}</td>
                 <td>{x.open_cases > 0 ? <Badge status="open" /> : <span className="muted">—</span>}</td>

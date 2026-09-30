@@ -46,7 +46,19 @@ export const GET = api(async (_req: NextRequest, _b: any, user, ctx) => {
        WHERE fr.student_id=? AND fs.plan_id=? ORDER BY fr.id DESC LIMIT 1`, [o.student_id, o.plan_id]),
   ]);
 
-  return ok({ order: o, items, cases, logs, fitting: fr });
+  const makeup = await one<any>(
+    `SELECT mk.*, ms.makeup_no, ms.start_time makeup_start, ms.end_time makeup_end, ms.location makeup_location,
+            ms.manual_adjust_reason
+       FROM makeup_students mk
+       LEFT JOIN makeup_sessions ms ON ms.id=mk.makeup_session_id
+      WHERE mk.order_id=? ORDER BY mk.id DESC LIMIT 1`, [id]);
+  const mkDecisions = makeup
+    ? await query(
+        `SELECT md.*, u.real_name decider_name FROM makeup_decisions md
+          LEFT JOIN users u ON u.id=md.decided_by WHERE md.makeup_student_id=? ORDER BY md.id`, [makeup.id])
+    : [];
+
+  return ok({ order: o, items, cases, logs, fitting: fr, makeup, mkDecisions });
 });
 
 // 修改明细尺码（家长确认前）
@@ -108,6 +120,7 @@ export const POST = api(async (req: NextRequest, body: any, user) => {
     }
     case 'release': {
       if (!['admin', 'general_affairs'].includes(user.role)) return fail('仅总务可解除挂起', 403);
+      if (o.status === 'review') return fail('两次确认不一致待复核，请到「集中补测」完成复核裁决，不能直接解除', 400);
       const target = Number(o.paid_amount) > 0 ? 'paid' : 'confirmed';
       await query("UPDATE orders SET status=?, hold_reason=NULL WHERE id=?", [target, o.id]);
       await logActivity({ student_id: o.student_id, order_id: o.id, actor: user, action: '解除挂起', detail: `状态→${target}` });
